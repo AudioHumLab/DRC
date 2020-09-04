@@ -295,13 +295,13 @@ eq = smooth(freq, eq, Noct=24)
 #
 #   The ARTA .frd files have:
 #   - a length power of 2
-#   - firts bin is 0 Hz
+#   - first bin is 0 Hz
 #   - if fs=48000, last bin is fs/2
 #   - if fs=44100, last bin is (fs/2)-1  ¿!? what the fuck
 #
 #   NOTE: when interpolating by using pydsd.lininterp it is guarantied:
 #   - The length of the new semispectrum will be ODD (power of 2) + 1,
-#     this is convenient to compute an EVEN whole semispectrum, which will
+#     this is convenient to compute an EVEN whole spectrum, which will
 #     be used to synthethise the FIR by IFFT.
 #   - The first bin is 0 Hz and last bin is Nyquist.
 #
@@ -329,9 +329,6 @@ imp = pydsd.semiblackmanharris(m) * imp[:m]
 
 # From now on, 'imp' has a causal response, a natural one, i.e. minimum phase
 
-# 3.5 linear-phase version (experimental)
-impLP = tools.MP2LP(imp, windowed=True, kaiserBeta=1)
-
 
 ##########################################################################
 # 4. PLOTTING
@@ -353,16 +350,16 @@ ax.plot(freq, mag,
                         label="raw response (" + str(len(mag)) + " bins)",
                         color="silver", linestyle=":", linewidth=.5)
 
+# target (smoothed) curve:
+ax.plot(freq, target,
+                        label="smoothed response",
+                        color="blue", linestyle='-')
+
 # the chunk curve used for getting the ref level:
 if autoRef:
     ax.plot(freq[ f1_idx : f2_idx], rmag[ f1_idx : f2_idx ],
                         label="range to estimate ref level",
                         color="black", linestyle="--", linewidth=2)
-
-# target (smoothed) curve:
-ax.plot(freq, target,
-                        label="smoothed response",
-                        color="blue", linestyle='-')
 
 # window for positive gains
 if not noPos:
@@ -430,23 +427,20 @@ os.system("mkdir -p " + dirSal)
 ch = 'C'
 if FRDbasename[0].upper() in ('L','R'):
     ch = FRDbasename[0].upper()
-mpEQpcmname = f'{dirSal}/drc.{ch}.{suffix}.pcm'
-lpEQpcmname = f'{dirSal}/drc.{ch}.{suffix}_lp.pcm'
+EQpcmname = f'{dirSal}/drc.{ch}.{suffix}.pcm'
 
-# Saving FIR files:
-print( "(i) Saving EQ FIRs:" )
-print( "    " + str(fs) + "_" + tools.Ktaps(m).replace(' ','') + "/" + mpEQpcmname.split("/")[-1] )
-print( "    " + str(fs) + "_" + tools.Ktaps(m).replace(' ','') + "/" + lpEQpcmname.split("/")[-1] )
-tools.savePCM32(imp,   mpEQpcmname)
-tools.savePCM32(impLP, lpEQpcmname)
+# Saving FIR file:
+print( "(i) Saving EQ FIR:" )
+print( "    " + str(fs) + "_" + tools.Ktaps(m).replace(' ','') + "/" + EQpcmname.split("/")[-1] )
+tools.savePCM32(imp, EQpcmname)
 
 
 ##########################################################################
 # 7. FIR visualizer
 ##########################################################################
 if viewFIRs:
-    print( "FIR plotting with audiotools/IRs_viewer.py ..." )
-    os.system("IRs_viewer.py '" + mpEQpcmname + "' '" + lpEQpcmname
-              + "' 20-20000 -eq -1 " + str(int(fs)))
+    print( "FIR plotting with audiotools/IR_tool.py ..." )
+    os.system("IRs_tool.py '" + EQpcmname + "' '" +
+              + "' 20-20000 -dBrange=36 -dBtop=12 -1 " + str(int(fs)))
 
 # ALL DONE ;-)
