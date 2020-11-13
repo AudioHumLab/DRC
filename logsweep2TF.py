@@ -25,113 +25,126 @@
 """
     logsweep2TF.py
 
-    Obtiene la TF Transfer Function de un DUT (device under test) mediante
-    la deconvolución de una señal de excitación (logsweep) y
-    la respuesta capturada por el micrófono.
+    Computes the TF Transfer Function from a Device-Under-Test, through by the
+    deconvolution of an excitation log-sweep signal and the mic captured one.
 
-    DUT   ---> LEFT CHANNEL  (Señal del micrófono)
-    LOOP  ---> RIGHT CHANNEL (Bucle opcional para ayudar a validar la medida según la
-                              latencia HW vs la longitud N de la secuencia de pruebas)
 
-    Uso:      python logsweep2TF.py  [opciones ... ...]
+    Sound card wiring:
 
-    -h                  Ayuda
+      out L ------>-------  DUT (loudspeaker analog line input)
 
-    -sc                 Solicita una sound card y la prueba.
-    -dev=cap,pbk,fs     Usa los sound devices y la fs indicada.
-                        NO son devices ALSA, usar -h para ver un listado.
+      in  L ------<-------  MIC
 
-    -eXX                Potencia de 2 que determina la longitud=2^XX total
-                        en muestras (N) de la señal de prueba. Por defecto 2^17.
+      out R --->---
+                   |        Optional reference loop for
+      in  R ---<---         Time Clearance checkup.
 
-    -noclearance        Elude la validación por excesiva latencia.
-    -auxplots           Muestra las gráficas auxiliares (sweeps grabados)
-    -notfplot           No muestra la gráfica de la TF obtenida
-    -smooth             Muestra la TF suavizada
+
+    Usage:      python3 logsweep2TF.py  [options ... ...]
+
+    -h                  Help
+
+    -sc                 Request a sound card and proof.
+
+    -dev=cap,pbk,fs     Sund devices and fs to use.
+                        Use -h to list the available ones.
+
+    -eXX                Power of 2 that determines the total lenght N of the
+                        test log-sweep. Default 2^18 = 256K samples ~ 4 sec
+
+
+    -noclearance        Ommit time clearance validation.
+
+    -nosmooth           Will plot raw freq response. Default smooth at 1/24 oct
+
+    -auxplots           plot aux graphs (work in progress)
 
 """
-#-------------------------------------------------------------------------------------------
-#-------------------------------- CRÉDITOS: ------------------------------------------------
-#-------------------------------------------------------------------------------------------
-# Este script está basado en el siguiente código Matlab Open Source:
-# 'An Open-Source Electroacoustic Measurement System'
-# Richard Mann and John Vanderkooy, March 2017, Audio Research Group, University of Waterloo
+#-------------------------------------------------------------------------------
+#-------------------------------- CREDITS: -------------------------------------
+#-------------------------------------------------------------------------------
+# This script is based on the Matlab Open Source code:
+#   'An Open-Source Electroacoustic Measurement System'
+#   Richard Mann and John Vanderkooy, March 2017,
+#   Audio Research Group, University of Waterloo
 #
-# Publicado en:
 # https://linearaudio.net/volumes/2282
 # https://linearaudio.net/downloads
 # https://linearaudio.net/sites/linearaudio.net/files/vol%2013%20rm%26jvdk%20readme%26m-files%20p1.zip
 # https://linearaudio.net/sites/linearaudio.net/files/vol%2013%20rm%26jvdk%20readme%26m-files%20p2.zip
 #
 #
-#   Observaciones:
+#   Notes:
+#   - calibration options are not considered here
+#   - windowing for quasi-anechoic analisys is not performed here
 #
-#   - En la sección "data gathering ... ..." una vez capturada la señal 'dut' se redefine
-#   N=len(dut). Esto lo he descartado entiendo que no tiene efectos secundarios.
-#
-#   - El nivel max de la señal en domT no se corresponde con el max en domF,
-#   confirmar si es correcto, yo creo que si.
-#
-#   - La opciones de calibración no se toman en cuenta aquí.
 
-#---------------------------- IMPORT MODULES: -------------------------
-#  ~/audiotools modules
+#---------------------------- IMPORTING MODULES: -------------------------
 import os
 import sys
-HOME = os.path.expanduser("~")
-sys.path.append(HOME + "/audiotools")
-from smoothSpectrum import smoothSpectrum as smooth
+from time import time
 
-from time import time       # Para evaluar el tiempo de proceso de algunos cálculos,
-                            # como por ejemplo la crosscorrelation que tarda un güevo.
+# https://matplotlib.org/faq/howto_faq.html#working-with-threads
+import matplotlib
+# Later we will be able to call matplotlib.use('Agg') to replace the regular
+# display backend (e.g. 'Mac OSX') by the dummy one 'Agg' in order to avoid
+# incompatibility when threading this module, e.g. when using a Tcl/Tk GUI.
+import matplotlib.pyplot as plt
 
-from matplotlib import pyplot as plt
+from matplotlib.ticker import EngFormatter
 from numpy import *
-from scipy import interpolate # para aligerar el ploteo de la TF smoothed
+from scipy.signal import correlate as signal_correlate # to differentiate it from numpy
 
-from scipy.signal import correlate as signal_correlate
-# signal.correlate muestra un FutureWarning, lo inhibimos:
+# scipy.signal.correlate shows a FutureWarning, we do inhibit it:
 import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
-import sounddevice as sd    # https://python-sounddevice.readthedocs.io
+# https://python-sounddevice.readthedocs.io
+import sounddevice as sd
 
-#---------------------------------------------------------------------
-#------------------------- DEFAULT OPTIONS: --------------------------
-#---------------------------------------------------------------------
+UHOME = os.path.expanduser("~")
+sys.path.append(UHOME + "/audiotools")
+from smoothSpectrum import smoothSpectrum as smooth
+import tools
+
+#-------------------------------------------------------------------------------
+#----------------------------- DEFAULT OPTIONS: --------------------------------
+#-------------------------------------------------------------------------------
 select_card         = False
-selected_card       = None
+selected_card       = ''
 checkClearence      = True
 
 printInfo           = True
-TFplot              = False
-auxPlots            = False
-plotSmoothSpectrum  = False  # añadir gráfica TF suavizada (OjO esto tarda)
 
-#---------------------------------------------------------------------
-#--------------------------- DEFAULT PARAMETERS: ---------------------
-#---------------------------------------------------------------------
+do_plot             = True      # recorded, time clearance, freq response plots
+aux_plot            = False     # currently only for the prepared sweep plot
+
+#-------------------------------------------------------------------------------
+#----------------------------- DEFAULT PARAMETERS: -----------------------------
+#-------------------------------------------------------------------------------
 sig_frac    = 0.5               # Fraction of full scale applied to play the sweep.
 fs          = 48000             # Must ensure that sound driver accepts.
 N           = 2**18             # Lenght of the total sequence, make this
                                 # larger if there is insufficient time clearance
+clipWarning = -3.0              # dBFS warning when capturing
+
 system_type = 'electronic'      # 'acoustic', 'electronic', 'level-dependent'
 Po          = 2e-5              # SPL reference pressure
 c           = 343               # speed of sound
 
-#--------------------------- USE OPTIONS --------------------
-dBclearance         = 10        # white space above TF plots
-dBspan              = 60        # total scale of TF plots
-minFrecPlot         = 10        # min freq to plot
-clipWarning         = -3.0      # dBFS warning when capturing
+binsFRD     = 2**14             # Freq bins for output .frd files, default 16 Kbins
+Noct        = 24                # smoothing 1/N oct for freq response plots
 
-#----------------- System calibration factor CF for dut --------------------
+yplotmax    = 6                 # TF plots above 0 dB
+yplotspan   = 54                # total scale of TF plots
+
+#----------------- System calibration factor CF for dut ------------------------
 power_amp_gain  = 10            # V/V acoustic
 mic_cal         = 0.012         # V/Pa acoustic
 mic_preamp_gain = 10.0          # V/V acoustic
 Vw              = 1.0           # 2.83 V/watt8ohms acoustic Leave this=1 if not wanted
 electronic_gain = 1.0           # total gain in series with electronic system
-#------------------- Enter value for your soundcard: ------------------------
+#------------------- Enter value for your soundcard: ---------------------------
 S_dac = 1.0
 S_adc = 1.0
 ## S_dac=-1.22;         % UCA202
@@ -146,63 +159,66 @@ S_adc = 1.0
 ## S_adc=+1.49;         % USB Dual Pre JV pot minimum (gain=3, Windows 7)
 
 
-#---------------------------------------------------------------------
-#----------------------- INTERNAL PROCEDURES -------------------------
-#---------------------------------------------------------------------
 
 def choose_soundcard():
-    #sd.default.device = 'Built-in Microphone', 'Built-in Output' # Mac Book
 
-    tested = False
+    result = False
+
     tries = 0
-    while not tested and tries < 3:
+    while not result and tries < 3:
         print( "\n    SYSTEM SOUND DEVICES:\n" )
         print( sd.query_devices() )
         print()
-        print( "    Select capture  device: " ); i = int(input())
-        print( "    Select playback device: " ); o = int(input())
-        tested = test_soundcard(i,o)
+        print( "    Select capture  device: ", end='' ); i = int(input())
+        print( "    Select playback device: ", end='' ); o = int(input())
+        result = test_soundcard(i,o)
         tries += 1
 
-    return tested
+    return result
 
-def test_soundcard(i="default",o="default", fs=fs):
 
-    playrecOK = False
-    dummy1sec = zeros(int(1*fs))
-    print( "\n    SYSTEM SOUND DEVICES:\n" )
-    print( sd.query_devices() )
-    print()
-    sd.default.device = i, o # Sets the default device for the sounddevide module.
-    print( "    Trying play/rec:" )
+def test_soundcard(i="default",o="default", fs=fs, ch=2):
 
-    try:
-        print( "    ", sd.query_devices(i)['name'] )
-        print( "    ", sd.query_devices(o)['name'] )
+    dummy1sec = zeros(int(fs))
 
-    except:
-        print( "(!) Error accediendo a los devices " + str(i) + " / " + str(o) )
-        return  playrecOK
+    print( 'Trying:' )
+    print(f'    {sd.query_devices(i, kind="input" )["name"]}')
+    print(f'    {sd.query_devices(o, kind="output")["name"]}')
 
     try:
-        chk_rec = sd.check_input_settings(i, channels=2, samplerate=float(fs))
-        chk_pb  = sd.check_output_settings(o, channels=2, samplerate=float(fs))
-        dummy = sd.playrec(dummy1sec)
-        playrecOK = True
-        print( "    Sound device settings are supported" )
-    except:
-        print( "\n(!) FAILED to playback and recording on selected device." )
+        sd.default.device = i, o
+    except Exception as e:
+        print( f'(!) Error accesing devices [{i},{o}]: {e}' )
+        return e
 
-    return  playrecOK
+    try:
+        chk_rec = sd.check_input_settings (i, channels=ch, samplerate=float(fs))
+        chk_pb  = sd.check_output_settings(o, channels=ch, samplerate=float(fs))
+        print( f'Sound card parameters OK' )
+    except Exception as e:
+        print( f'(!) Sound card [{i},{o}] ERROR: {e}' )
+        return e
+
+    try:
+        dummy = sd.playrec(dummy1sec, samplerate=fs, channels=ch)
+        print( 'Sound device settings are supported' )
+    except Exception as e:
+        print( f'(!) FAILED to playback and recording on selected device: {e}' )
+        return e
+
+    return 'ok'
+
 
 def do_print_info():
 
-    print( "--- SYSTEM SOUND DEVICES:" )
+    print( "\n--- SYSTEM SOUND DEVICES:" )
     print( sd.query_devices() )
     rec, pb = sd.default.device
-    print( "    Using '" + str(rec) + "' to CAPTURE, '" + str(pb) + "' to PLAYBACK" )
-    print( "    [ DUT ] --> LEFT  ch  ||  [ REF ] --> RIGHT ch" )
-    print( "--- Parameters:" )
+    print( f"    Using '{str(pb)}' to PLAYBACK" )
+    print( f"          '{str(rec)}' to RECORD")
+    print( f"               LEFT  <--- [ DUT ]" )
+    print( f"               RIGHT <--- [ REF ]" )
+    print( f"\n--- Parameters:" )
     sig_frac_dBFS = round(20 * log10(sig_frac), 2)
     print( 'Amplitude:      ' + str(sig_frac) + ' (' + str(sig_frac_dBFS) + ' dBFS)' )
     print( 'fs:             ' + str(fs) + ' Hz' )
@@ -213,47 +229,216 @@ def do_print_info():
     print()
     return
 
-def plot_spectrum(MAG, fs=fs, semi=False, fini=20, fend=20000,
-                  fig=None, label=" ", color="blue"):
-    """ plotea un espectro 'mag'
-        semi: boolean que indica que 'mag' es un semiespectro
+
+def plot_FRDs( freq, curves, title='Freq. response', png_fname='', figure=100 ):
+    """ Plots multi FRD curves
+        freq:       The freq vector
+        curves:     A list of curves dictionaries: {magdB:, color:, label:}
+        png_fname:  A figure .png filename to be saved on disk
+        figure:     By calling a figure number, you can interleave the curves
+                    in the desired figure.
     """
-    if semi:
-        N = len(MAG)*2
+
+    # If this is a new figure, lets create it with a new axes:
+    if figure not in plt.get_fignums():
+        fig = plt.figure(figure)
+        ax = fig.add_subplot()
+
+        # plot warning level lines
+        ax.plot(freq, full(freq.shape, clipWarning), label='',
+                    linestyle='--', linewidth=0.5,  color='purple')
+
+        ax.plot(freq, full(freq.shape, 0.0),         label='',
+                    linestyle='--',       linewidth=0.75, color='purple')
+
+        # formatting
+        ax.set_title(title)
+        ax.set_xlim(20, 20000)
+        ax.set_ylim( yplotmax - yplotspan, yplotmax )
+        # Y ticks in 6 dB steps
+        ax.set_yticks( range(yplotmax - yplotspan, yplotmax + 6, 6) )
+        ax.set_xlabel('frequency [Hz]')
+        ax.set_ylabel('dB')
+        ax.grid(True, which="both")
+
+    # If the figure already exists, simply select it and select the existing axes:
     else:
-        N = len(MAG)
-    Kbins = str((N/2)/1024)
-    Fresol = float(fs)/N
-    #frecs = arange(0, N/2.0) * fs / N
-    frecs = linspace(0, int(fs/2), int(N/2))
-    #top  = 20 * log10(max(abs(TF[0:int(N/2)])))  # highest dB in plot
-    top = 0
-    MAGdB = 20 * log10(abs( MAG[0:int(N/2)] ))
-    plt.figure(fig)
-    plt.semilogx(frecs, MAGdB, color, label=label)
-    plt.grid()
-    plt.xlim( minFrecPlot, fs/2 )
-    plt.ylim( top+dBclearance-dBspan, top+dBclearance )
-    plt.xlim(fini, fend)
-    plt.legend()
-    plt.xlabel('frequency [Hz]')
-    plt.ylabel('dB')
-    plt.title('Magnitude Response (' + Kbins + ' Kbins, res = ' + str(round(Fresol,2)) + ' Hz)')
-    return
+        fig = plt.figure(figure)
+        ax = plt.gca()
 
-def make_sweep():
-    """ returns:    (windowsweep, sweep, Npad)
-                    The sequence to be played: faded sweep + end pad zeroes
-                    The raw one.
+    # plot curves
+    for i, c in enumerate(curves):
+        print(f'(LS.plotFRDs) figure#{figure} curve #{i} \'{c["label"]}\'')
+        ax.semilogx( freq, c['magdB'], color=c['color'], label=c['label'] )
+
+    # updating legend
+    ax.legend()
+
+    if png_fname:
+        plt.savefig(png_fname)
+
+
+def plot_system_response(png_folder=f'{UHOME}'):
+    """ plot layout:
+
+                [recorded_waveforms]  [time_clearance]  1/3 height
+
+                [        frequency____response       ]  2/3
     """
-    global Npad, indexf1, indexf2           # necesarias en otros procedimientos
 
-    # La secuencia total enviada tendrá longitud N (2**xx) muestras , pero
-    # el sweep no las ocupará todas, se deja al final un tramo de 'Npad' zeros
-    Npad = int(N/4)                         # zeros at the end of the total sequence
-    Ns   = N - Npad                         # most of array is used for sweep
-    ts   = linspace(0, Ns/float(fs), Ns)    # array de tiempos del sweep
-    # Al sweep se le aplica una 'windo' para 'fade in/out' en f1 y f2
+    fig = plt.figure(figsize=(9.0, 9.0))  # in inches
+
+    axDUT = plt.subplot2grid(shape=(3, 2), loc=(0, 0))
+    axTCL = plt.subplot2grid(shape=(3, 2), loc=(0, 1))
+    axFRE = plt.subplot2grid(shape=(3, 2), loc=(1, 0), colspan=2, rowspan=2)
+
+    #--- time domain vectors
+    vSamples = arange(0,N)                  # samples vector
+    vTimes   = vSamples / float(fs)         # samples to time conversion
+
+    #--- DUT and REFERENCE LOOP time domain plot
+    axREF = axDUT.twinx()
+
+    # Safe amplitudes
+    for axtmp in (axDUT, axREF):
+        for a in (.5, -.5):
+            axtmp.plot(vTimes, full(vTimes.shape,  a), label='',
+                       linestyle='dashed', linewidth=0.5, color='purple')
+
+    # DUT waveform
+    axDUT.plot(vTimes, dut, 'blue', linewidth=0.5, label='DUT')
+
+    # REF waveform
+    axREF.plot(vTimes, ref, 'grey', linewidth=0.5, label='REF')
+
+    axDUT.grid()
+    axREF.set_ylim(-1.5, 3.5)               # Sliding the dut and ref Y scales
+    axDUT.set_ylim(-3.5, 1.5)
+    axDUT.legend(loc='upper left')
+    axREF.legend(loc='lower left')
+    axDUT.set_xlabel('time [s]')
+    axDUT.set_title('Recorded sweeps')
+
+    #--- X cross correlation (Time Clearance)
+    t  = vTimes
+    t -= N/2.0 / fs                         # Centering the X ideal peak at 0 ms
+    maxX = max(abs(X))
+    ylim = 1000                             # Expected X >~ 1000
+    if maxX > ylim:
+        ylim += ylim * (maxX // ylim)
+    axTCL.set_ylim(-ylim, +ylim)
+    axTCL.plot(t, X, color="black", label='xcorr pb/rec')
+    axTCL.grid()
+    axTCL.legend()
+    axTCL.set_xlabel('time (s)')
+    axTCL.set_title(f'Time Clearance:\nrecorder lags  player <---o---> ' \
+                    f'recorder leads player', fontsize='medium')
+
+
+    #--- Freq Response
+    # plot warning level lines
+    axFRE.plot(FREQ, full(FREQ.shape, clipWarning), label='',
+                linestyle='--', linewidth=0.5,  color='purple')
+    axFRE.plot(FREQ, full(FREQ.shape, 0.0),         label='',
+                linestyle='--',       linewidth=0.75, color='purple')
+
+    # plot curves
+    axFRE.semilogx( FREQ, 20 * log10(DUT_FR), color='blue', label='DUT' )
+    axFRE.semilogx( FREQ, 20 * log10(REF_FR), color='gray', label='REF' )
+
+    # formatting
+    axFRE.set_title('Freq. response')
+    axFRE.set_xlim(20, 20000)
+    axFRE.set_ylim( yplotmax - yplotspan, yplotmax )
+    # Y ticks in 6 dB steps
+    axFRE.set_yticks( range(yplotmax - yplotspan, yplotmax + 6, 6) )
+    axFRE.grid(True, which="both")
+    axFRE.set_xlabel('frequency [Hz]')
+    axFRE.set_ylabel('dB')
+    # nice engineering formatting "1 K"
+    axFRE.xaxis.set_major_formatter( EngFormatter() )
+    axFRE.xaxis.set_minor_formatter( EngFormatter() )
+    # rotate_labels for both major and minor xticks
+    for label in axFRE.get_xticklabels(which='both'):
+        label.set_rotation(70)
+        label.set_horizontalalignment('center')
+    # updating legend
+    axFRE.legend()
+
+    plt.tight_layout()
+    plt.savefig(f'{png_folder}/system_response.png')
+    print( "--- Plotting system response graphs..." )
+
+
+def plot_aux_graphs(png_folder=f'{UHOME}'):
+    """ Aux graphs (currently only for the prepared sweep plot)
+    """
+
+    vSamples = arange(0,N)                  # samples vector
+    vTimes   = vSamples / float(fs)         # samples to time conversion
+
+    # ---- Sweep
+    fig, axSWE = plt.subplots(figsize=(4.5, 2.6))  # in inches
+    axSWE.plot(vTimes, sweep, '--', color='black', linewidth=2,  label='raw sweep')
+    axSWE.grid()
+    axSWE.plot(vTimes, tapsweep, color='blue', linewidth=1, label='tapered sweep')
+    axSWE.set_ylim(-2.5, 2.5)
+    axSWE.set_xlabel('time[s]')
+    axSWE.legend()
+    axSWE.set_title('Prepared sweeps')
+    plt.savefig(f'{png_folder}/prepared_sweeps.png')
+    print( "--- Plotting aux graphs..." )
+
+
+def fft_to_FRD(wholeFFT, fs=fs, smooth_Noct=0, Nbins=binsFRD):
+    """
+        Input:
+            wholeFFT        A whole FFT array
+            fs              Sampling freq
+            smooth_Noct     Do smooth 1/N oct the output curve
+            Nbins           Number of freq bins of the output curve
+        Output:
+            (f, mag)        A real valued positive semi-spectrum tuple FRD data
+                            (mag is given in lineal values not in dB)
+    """
+
+    N = len(wholeFFT)
+
+    # Frequencies
+    f = linspace(0, int(fs/2), int(N/2) )
+
+    # Taking the magnitude from the positive freqs fft part
+    mag = abs( wholeFFT[0:int(N/2)] )
+
+    # interpolates to Nbins
+    f, mag = tools.interp_semispectrum(f, mag, fs, Nbins)
+
+    # Smoothing
+    if smooth_Noct:
+        mag = smooth(f, mag, Noct=smooth_Noct)
+
+    return f, mag
+
+
+def prepare_sweep():
+    """ prepare globals to work:
+            sweep:      A raw sweep.
+            tapsweep:   The sequence to be played: faded sweep + a zeroes tail
+            indexf1:    Index of pre-tapper end freq in tapsweep
+    """
+    global sweep, tapsweep, indexf1
+
+
+    # The played tapsweep (len=N) will be compund of
+    # a logsweep (len=N-Npad) plus a zeros tail (len=Npad).
+    Npad = int(N/4.0)
+    Ns   = N - Npad                         # most of array is used for sweep ;-)
+
+    ts   = linspace(0, Ns/float(fs), Ns)    # sweep's time points array
+
+    #--- tapered sweep window:
+    # Parameters to define a window to make a tapered sweep version,
+    # fade in until f1 then fade out from f2 on:
     f_start     = 5.0                       # beginning of turnon half-Hann
     f1          = 10.0                      # end of turnon half-Hann
     f2          = 0.91 * fs / 2             # beginning of turnoff half-Hann
@@ -261,45 +446,30 @@ def make_sweep():
     Ts          = Ns/float(fs)              # sweep duration. Lenght N-Npad samples.
     Ls          = Ts / log(f_stop/f_start)  # time for frequency to increase by factor e
 
-    #--- tapered sweep window:
-    indexf1 = int(round(fs * Ls * log(f1/f_start) ) + 1)     # end of starting taper
-    indexf2 = int(round(fs * Ls * log(f2/f_start) ) + 1)     # beginning of ending taper
+    indexf1 = int(round(fs * Ls * log(f1/f_start) ) + 1) # end of starting taper
+    indexf2 = int(round(fs * Ls * log(f2/f_start) ) + 1) # beginning of ending taper
 
     print( "--- Calculating logsweep from ", int(f_start), "to", int(f_stop), "Hz" )
     sweep       = zeros(N)                  # initialize
     sweep[0:Ns] = sin( 2*pi * f_start * Ls * (exp(ts/Ls) - 1) )
     #
-    #  /\/\/\/\/\/\/\/\----  this is the LOGSWEEP+Npad, total lenght N.
+    #  /\/\/\/\/\/\/\/\----  this is the LOGSWEEP + Npad, with total lenght N.
 
-    # tappers para fade in / fade out en el tramo del sweep:
-    windo   = ones(N)
+    window   = ones(N)
     # pre-taper
-    windo[0:indexf1]  = 0.5 * (1 - cos(pi * arange(0, indexf1)    / indexf1     ) )
+    window[0:indexf1]  = 0.5 * (1 - cos(pi * arange(0, indexf1)    / indexf1     ) )
     # post-taper
-    windo[indexf2:Ns] = 0.5 * (1 + cos(pi * arange(0, Ns-indexf2) / (Ns-indexf2)) )
-    windo[Ns:N]       = 0       # Zeropad end of sweep. (i) Esto creo que es redundante
-                                # porque el sweep ya tiene zeros ahí.
-    windosweep = windo * sweep  # Here the LOGSWEEP tapered at each end for output to DAC
+    window[indexf2:Ns] = 0.5 * (1 + cos(pi * arange(0, Ns-indexf2) / (Ns-indexf2)) )
+    window[Ns:N]       = 0      # Zeropad end of sweep
 
-    # NOTA no tengo claro el interés de pritar esto:
-    print( "f_start * Ls: " + str(round(f_start*Ls, 2)) + \
-          "   Ls: "  + str(round(Ls,2)) + "    ¿!?" )
-    print( 'Finished sweep generation...' )
-    print( )
-    # ---- Plot del sweep (domT)
-    if auxPlots:
-        plt.figure(10)
-        vSamples = arange(0,N)              # vector de samples
-        vTimes   = vSamples / float(fs)     # samples a tiempos para visualización
-        plt.plot(vTimes, sweep,      color='red',  label='raw sweep')
-        plt.grid()
-        plt.plot(vTimes, windosweep, color='blue', label='windowed sweep')
-        plt.ylim(-1.5, 1.5)
-        plt.xlabel('time[s]')
-        plt.legend()
-        plt.title('Sweeps')
+    # Here the LOGSWEEP tapered at each end for output to DAC
+    tapsweep = window * sweep
 
-    return windosweep, sweep
+    # pending to find out the meaning fo this:
+    print( f'f_start * Ls: {str(round(f_start*Ls, 2))}  Ls: {str(round(Ls,2))}')
+
+    print( 'Finished sweep generation...\n' )
+
 
 def get_offset_xcorr(sweep, dut, ref):
     """
@@ -312,6 +482,9 @@ def get_offset_xcorr(sweep, dut, ref):
     returns: offset, TimeClearanceOK
 
     """
+
+    global X  # global scoped for plotting later
+
     ### Matlab code:
     # lags = N/2                    % large enough to catch most delays
     #                                 (!) no usable en Numpy.correlate
@@ -323,59 +496,64 @@ def get_offset_xcorr(sweep, dut, ref):
     ## [~,nmax]=max(abs(X));
 
     # Correlate with an automatic reference selection:
-    # (i) Para estimar el offset, es preferible tomar una señal poco alterada.
-    #     Es posible que la señal captada por el micro sea 'noisy' para poder correlarla.
-    #     Si no se detecta señal en el canal de referencia, se usa a malas la del micro.
+    # (i) For offset estimation, it is preferred to take an undisturbed signal.
+    #     The mic captured signal maybe too noisy to be able to be correlated.
+    #     If not enough signal in ref channel, will use the mic channel instead.
+
     myref = ref
     if max(ref) < 0.1 * max(dut):  # but if no signal on ref, use data itself
         myref = dut
-        print( "(i) Bad level on REF ch, using DUT ch itself to estimate clearance" )
+        print('(!) Bad level on REF ch, using DUT ch itself to estimate clearance')
 
-    print( "--- Determining record/play delay using crosscorrelation (can take a while ...)" )
-    TimeClearanceOK = False
+    print( '--- Determining record/play delay using crosscorrelation '
+           '(can take a while ...)' )
+
     timestamp = time()
 
-    ### (i) Correlation in NUMPY/SCIPY no usa el parámetro lags como en MATLAB
+    ### (i) scipy.signal.correlate doesn't use the parameter 'lags' as in Matlab
+    #      (numpy.correlate is too slow, will use scipy.signal equivalent)
 
-    # Correlate de Numpy tarda mucho, usamos el de signal
-    # PEEEERO escupe un FutureWarning al menos en mi versión
-    # que queda feo en la consola :-/
     X = signal_correlate(sweep, myref, mode="same")
     offset = int(N/2) - argmax(X)
 
     print( "Computed in " + str( round(time() - timestamp, 1) ) + " s" )
-
-    if auxPlots:
-        t  = arange(0, N) / float(fs) # linea de tiempo
-        t -= N/2.0 / fs               # centramos el 0 en el pico ideal de X
-        plt.figure(30)
-        plt.plot(t, X, color="black", label='xcorr pb/rec')
-        plt.grid()
-        plt.legend()
-        plt.xlabel('time (s)')
-        plt.title('recorder lags  player <----|----> recorder leads player')
 
     print( 'Record offset: ' +  str(offset) + ' samples' + \
           ' (' +  str( round( offset/float(fs), 3) ) + ' s)' )
     if offset < 0:
         print( '(i) Negative offset means player lags recorder!' )
 
+    Npad=int(N/4.0)
     if abs(offset) > Npad:
-        print( '******INSUFFICIENT TIME CLEARANCE!******' )
-        print( '******INSUFFICIENT TIME CLEARANCE!******' )
-        print( '******INSUFFICIENT TIME CLEARANCE!******' )
+        TimeClearanceOK = False
     else:
         TimeClearanceOK = True
 
     return offset, TimeClearanceOK
 
-def do_meas(windosweep, sweep):
+
+def do_meas():
     """
-    returns:    DUT_SWEEP (The Transfer Function of the DUT),
-                    If errors, returns zeros(N)
+    Compute globals about DUT Device-Under-Test and REFerence measurements.
+
+        dut,    ref             Time domain captured waveforms
+
+        DUT_TF, REF_TF          Freq domain Transfer Functions (whole complex FFTs)
+
+        FREQ, DUT_FR, REF_FR    Freq Response Data rendered over the configured
+                                <binsFRD> frequency bins.
+
+        TimeClearanceOK         Boolean about the detected time clearance
+
     """
+
+    global dut,    ref
+    global DUT_TF, REF_TF
+    global FREQ, DUT_FR, REF_FR
+    global TimeClearanceOK
+
     #---------------------------------------------------------------------------
-    # ---- Determina SPL calibration factor en función del tipo de sistema -----
+    # ---- SPL calibration as per system type
     #---------------------------------------------------------------------------
     if system_type == 'acoustic':
         CF = Vw / (power_amp_gain * mic_cal * mic_preamp_gain * Po)
@@ -387,144 +565,117 @@ def do_meas(windosweep, sweep):
         print( "(!) Please check system_type for CF" )
         return zeros(N)
 
-    #-----------------------------------------------------------------------------
-    #------------ 2. data gathering: send out sweep, record system output --------
-    #-----------------------------------------------------------------------------
+    #---------------------------------------------------------------------------
+    #---------- 2. data gathering: send out sweep, record system output --------
+    #---------------------------------------------------------------------------
     print( '--- Starting recording ...' )
     print( '(i) Some sound cards act strangely. Check carefully!' )
+
     # Antiphased signals on channels avoids codec midtap modulation.
-    # Se aplica atenuación según 'sig_frac'
-    stereo = array([sig_frac * windosweep, sig_frac * -windosweep]) # [ch0, ch1]
+    # 'sig_frac' means the applied attenuation
+    stereo = array([sig_frac * tapsweep, sig_frac * -tapsweep]) # [ch0, ch1]
+
+    # Setting sound device interface
     sd.default.samplerate = fs
     sd.default.channels = 2
-    # (i) .transpose pq el player necesita una array con cada canal en una COLUMNA.
-    z = sd.playrec(stereo.transpose(), blocking=True) # 'blocking' waits to finish.
+    rec_dev_name = sd.query_devices(sd.default.device[0], kind='input' )['name']
+    pbk_dev_name = sd.query_devices(sd.default.device[1], kind='output')['name']
+    print(f'    in: {rec_dev_name}, out: {pbk_dev_name}, fs: {sd.default.samplerate}')
+
+    # Full duplex Play/Rec
+    # (i) .transpose because the player needs an array having a channel per column.
+    #     'blocking' waits to finish.
+    z = sd.playrec(stereo.transpose(), blocking=True)
     dut = z[:, 0]   # we use LEFT  CHANNEL as DUT
     ref = z[:, 1]   # we use RIGHT CHANNEL as REFERENCE
-    #N   = len(dut) # esto creo que es innecesario
+    #N = len(dut)   # This seems to be redundant ¿?
     print( 'Finished recording.' )
 
-    #---------------------------  Cheking LEVELS -----------------------------------
+    #-------------  Checking time domain RECORDING LEVELS ----------------------
     print( "--- Checking levels:" )
-    maxdBFS_DUT = 20 * log10( max( abs( dut ) ) )
-    maxdBFS_REF = 20 * log10( max( abs( ref ) ) )
-    # Esto supongo que debe ser una información de energía ¿?
-    DUT_RMS_LSBs = round(sqrt( 2**30 * sum(dut**2) / N ), 2)
-    REF_RMS_LSBs = round(sqrt( 2**30 * sum(ref**2) / N ), 2)
+    maxdBFS_dut = 20 * log10( max( abs( dut ) ) )
+    maxdBFS_ref = 20 * log10( max( abs( ref ) ) )
+    # LSB: Less Significant Bit
+    dut_RMS_LSBs = round(sqrt( 2**30 * sum(dut**2) / N ), 2)
+    ref_RMS_LSBs = round(sqrt( 2**30 * sum(ref**2) / N ), 2)
 
-    if maxdBFS_DUT >= clipWarning:
-        print( 'DUT channel max level:', round(maxdBFS_DUT, 1), 'dBFS  WARNING (!)', \
-              'RMS_LSBs:',  DUT_RMS_LSBs )
+    if maxdBFS_dut >= clipWarning:
+        print( 'DUT channel max level:', round(maxdBFS_dut, 1), 'dBFS  WARNING (!)', \
+              'RMS_LSBs:',  dut_RMS_LSBs )
     else:
-        print( 'DUT channel max level:', round(maxdBFS_DUT, 1), 'dBFS             ', \
-              'RMS_LSBs:',  DUT_RMS_LSBs )
+        print( 'DUT channel max level:', round(maxdBFS_dut, 1), 'dBFS             ', \
+              'RMS_LSBs:',  dut_RMS_LSBs )
 
-    if maxdBFS_REF >= clipWarning:
-        print( 'REF channel max level:', round(maxdBFS_REF, 1), 'dBFS  WARNING (!)', \
-              'RMS_LSBs:',  REF_RMS_LSBs )
+    if maxdBFS_ref >= clipWarning:
+        print( 'REF channel max level:', round(maxdBFS_ref, 1), 'dBFS  WARNING (!)', \
+              'RMS_LSBs:',  ref_RMS_LSBs )
     else:
-        print( 'REF channel max level:', round(maxdBFS_REF, 1), 'dBFS             ', \
-              'RMS_LSBs:',  REF_RMS_LSBs )
+        print( 'REF channel max level:', round(maxdBFS_ref, 1), 'dBFS             ', \
+              'RMS_LSBs:',  ref_RMS_LSBs )
 
-    #--- Plots time domain de la grabación del DUT y del REFERENCE LOOP
-    if auxPlots:
-        plt.figure(20)
-        vTimes = arange(0,N) / float(fs)    # vector de samples en segundos
-        plt.plot(vTimes, dut,       'blue', label='raw dut')
-        plt.plot(vTimes, ref + 2.0, 'grey', label='raw ref (offset+2.0)')
-        plt.grid()
-        plt.ylim(-1.5, 3.5)
-        plt.legend()
-        plt.xlabel('Time [s]')
-        plt.title('Recorded responses');
-
-    #-----------------------------------------------------------------------------
-    #------------- 3. Determine if time clearance: -------------------------------
-    # Checks if ound card play/rec delay is lower than the zeropad silence at the signal end.
-    # ( Will use crosscorrelation )
-    #-----------------------------------------------------------------------------
+    #---------------------------------------------------------------------------
+    #------------- 3. Determine if time clearance: -----------------------------
+    # Checks if ound card play/rec delay is lower than the zeropad silence
+    # at the signal end. Will use crosscorrelation
+    #---------------------------------------------------------------------------
     offset = 0              # ideal record/play delay
-    TimeClearanceOK = True  # forzamos aunque pudiera ser falso.
+    TimeClearanceOK = True
     if checkClearence:
         offset, TimeClearanceOK = get_offset_xcorr(sweep=sweep, dut=dut, ref=ref)
 
-    #-----------------------------------------------------------------------------
-    #-------------- 4. Calculate TFs using Frequency Domain Ratios * -------------
+    #---------------------------------------------------------------------------
+    #-------------- 4. Calculate TFs using Frequency Domain Ratios (*) ---------
     #                   UCASE used for freq domain variables.
     #                   All frequency variables are meant to be voltage spectra
-    #-----------------------------------------------------------------------------
+    #---------------------------------------------------------------------------
     lwindo = ones(N)
-    lwindo[0:indexf1] = 0.5 * ( 1- cos ( pi * arange(0,indexf1) / indexf1 ) ) # LF pre-taper
+    # LF pre-taper
+    lwindo[0:indexf1] = 0.5 * ( 1 - cos ( pi * arange(0,indexf1) / indexf1 ) )
     lwindosweep = lwindo * sweep
     # remove play-record delay by shifting computer sweep array:
-    ## %sweep=circshift(sweep,-offset);             # Esto aparece comentado en el cód. original,
-    ## lwindosweep=circshift(lwindosweep,-offset);  # que usa este código.
+    #%sweep=circshift(sweep,-offset);            # commented out in original code
+    #lwindosweep=circshift(lwindosweep,-offset); # then replaced by this line
     lwindosweep = roll(lwindosweep, -offset)
 
-    # (i) NÓTESE que trabajamos con FFTs completas:
-    LWINDOSWEEP = S_dac * fft.fft(lwindosweep) * sig_frac   # sig_frac es la atenuación establecida al sweep
+    # (i) NOTICE we use whole FFTs
+    LWINDOSWEEP = S_dac * fft.fft(lwindosweep) * sig_frac   # sig_frac ~ atten
     REF         = S_adc * fft.fft(ref)
-    DUT         = S_adc * fft.fft(dut)         * CF         # CF calibration factor
+    DUT         = S_adc * fft.fft(dut)         * CF         # Calibration Factor
 
-    # (i) La DECONVOLUCIÓN, mediante división en el dominio de la frecuencia
-    #     - o sea los 'Frequency Domain Ratios' referidos arriba(*) -
-    #     proporciona la TF Transfer Function del dispositivo bajo ensayo DUT
-    #     que es el objetivo que nos ocupa ;-)
+    # The DECONVOLUTION (i.e ~ freq domain division) provides the TF of DUT
+    # (*) Above referred as 'Frequency Domain Ratios'
 
-    ##%TF       = DUT./SWEEP;                                # <- código original comentado
-    DUT_SWEEP   = DUT / LWINDOSWEEP  # (orig named as 'TF' )   this has good Nyquist behaviour
-    DUT_REF     = DUT / REF          # (orig named as 'TF2')
+    DUT_TF   = DUT / LWINDOSWEEP
+    REF_TF   = REF / LWINDOSWEEP
 
-    #-----------------------------------------------------------------------------
-    #-------------------------  PLOTTING FREQ RESPONSES --------------------------
-    #-----------------------------------------------------------------------------
-    if TFplot:
-        plot_spectrum(DUT_SWEEP, fig=100, label='DUT/SWEEP', color='blue')
-        plot_spectrum(DUT_REF,   fig=100, label='DUT/REF',   color="grey")
+    # ADD ON: getting a FRD (freq response data) from the measured TFs (fft)
+    if Noct:
+        print( '--- Smoothing spectrum for DUT and REF (this can take a while ...)' )
+        t_start = time()
 
-        if plotSmoothSpectrum:
-            # Para aligerar el trabajo de suavizado, que tarda mucho,
-            # preparamos una versión reducida de DUT_SWEEP
+    FREQ, DUT_FR = fft_to_FRD(DUT_TF, fs, smooth_Noct=Noct)
+    _   , REF_FR = fft_to_FRD(REF_TF, fs, smooth_Noct=Noct)
 
-            frecOrig = arange(0, N/2.0)  * fs / N
-            magOrig  = DUT_SWEEP[0:N/2] # tomamos solo el semiespectro positivo
+    if Noct:
+        print(f'--- Smoothing computed in {str( round(time() - t_start, 1) )} s' )
 
-            N2 = N/4                    # remuestreo a un cuarto para aligerar
-            frecNew  = arange(0, N2/2.0) * fs / N2
-            # Definimos la func. de interpolación que nos ayudará a obtener las mags reducidas
-            funcI = interpolate.interp1d(frecOrig, magOrig, kind="cubic", bounds_error=False,
-                                     fill_value="extrapolate")
-            # Obtenemos las magnitudes interpoladas en las 'fnew':
-            magNew = funcI(frecNew)
+    # END
 
-            print( "--- Smoothing DUT spectrum (this can take a while ...)" )
-            t_start = time()
-            # (i) 'audiotools.smooth' trabaja con semiespectros positivos y reales (no complejos)
-            smoothed = smooth(frecNew, abs(magNew), Noct=24)
-            plot_spectrum(smoothed, semi=True, fig=100, color='green', label='DUT/SWEEP smoothed')
-            print( "Smoothing computed in " + str( round(time() - t_start, 1) ) + " s" )
+    # (i)   The results are the above referenced global scoped variables.
+    #
+    #       The orginal code Logsweep1quasi.m continues finding the loudspeaker
+    #       quasi-anechoic response, by using markers to windowing the recorded
+    #       time domain signal.
+    #       Here we don't need that, because we use the stationary in-room
+    #       loudspeaker response.
 
-    ### (i)
-    ##  A partir de aquí , el código original de Logsweep1quasi.m está destinado a
-    ##  encontrar la respuesta quasi anecoica de un altavoz, a base de definir marcadores para
-    ##  enventanar la medida DUT.
-    ##  A nosotros nos interesa la respuesta estacionaria in room.
 
-    if TimeClearanceOK:
-        return DUT_SWEEP
-    else:
-        return zeros(N)
-
-#-----------------------------------------------------------------------------
-#--------------------------------- MAIN PROGRAM ------------------------------
-#-----------------------------------------------------------------------------
+#-------------------------------------------------------------------------------
+#--------------------------------- MAIN PROGRAM --------------------------------
+#-------------------------------------------------------------------------------
 if __name__ == "__main__":
 
-    # Las gráficas son mostradas por defecto
-    TFplot      = True
-    auxPlots    = True
-
-    # Lee la command line
+    # Reading command line options
     opcsOK = True
     for opc in sys.argv[1:]:
 
@@ -538,14 +689,8 @@ if __name__ == "__main__":
         elif "-noinfo" in opc.lower():
             printInfo = True
 
-        elif "-notf" in opc.lower():
-            TFplot = False
-
-        elif "-noaux" in opc.lower():
-            auxPlots = False
-
-        elif "-smoo" in opc.lower():
-            plotSmoothSpectrum = True
+        elif "-nosmoo" in opc.lower():
+            Noct = 0
 
         elif "-noclear" in opc.lower():
             checkClearence = False
@@ -566,6 +711,9 @@ if __name__ == "__main__":
         elif "-e" in opc:
             N = 2**int(opc[2:])
 
+        elif "-aux" in opc.lower():
+            aux_plot = True
+
         else:
             opcsOK = False
 
@@ -583,11 +731,12 @@ if __name__ == "__main__":
         except: pass
         if i.isdigit(): i = int(i)
         if o.isdigit(): o = int(o)
-        if not test_soundcard(i=i, o=o):    # Si fallara sale
+        # A sound card failure will end the script.
+        if not test_soundcard(i=i, o=o):
             sys.exit()
 
     if select_card:
-        if not choose_soundcard():          # Si falla la selección
+        if not choose_soundcard():
             print( "(!) Error using devices to play/rec:" )
             for dev in sd.default.device:
                 print( "    " + sd.query_devices(dev)['name'] )
@@ -596,10 +745,41 @@ if __name__ == "__main__":
     if printInfo:
         do_print_info()
 
-    windosweep, sweep = make_sweep()
+    # Do create the needed raw and tapered sweeps
+    prepare_sweep()
 
-    TF = do_meas(windosweep, sweep)
+    # MEASURE
+    do_meas()
 
-    if auxPlots or TFplot:
-        print( "--- Showing the graphs..." )
+    # Checking TIME CLEARANCE
+    if not TimeClearanceOK:
+        print( '****************************************' )
+        print( '********  POOR TIME CLEARANCE!  ********' )
+        print( '********   check sweep length   ********' )
+        print( '****************************************' )
+
+    # Checking FREQ DOMAIN SPECTRUM LEVEL
+    maxdB = max( 20 * log10(DUT_FR) )
+
+    if  maxdB > 0.0:
+        print( '****************************************' )
+        print(f'CLIPPING DETECTED: +{round(maxdB,1)} dB  ' )
+        print( '****************************************' )
+    elif  maxdB > clipWarning:
+        print( '****************************************' )
+        print(f'CLOSE TO CLIPPING: {round(maxdB,1)} dB  ' )
+        print( '****************************************' )
+    elif maxdB < -20.0:
+        print( '****************************************' )
+        print(f'TOO LOW: {round(maxdB,1)} dB  ' )
+        print( '****************************************' )
+    else:
+        print( '****************************************' )
+        print(f'LEVEL OK: {round(maxdB,1)} dB  ' )
+        print( '****************************************' )
+
+    if do_plot:
+        plot_system_response()
+        if aux_plot:
+            plot_aux_graphs()
         plt.show()
