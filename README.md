@@ -73,11 +73,13 @@ The **reference level** on which it is applied the EQ is automatically detected,
 
             -schro=     Schroeder freq. (default 200 Hz)
 
-                        Gaussian windows to progressively limit positive EQ:
+            -doFIR      Generates the pcm FIR after estimating the final EQ.
 
-            -wLfc=      Low window center freq  (default: at 5 oct ~ 630 Hz)
+                ~~~ Gaussian windows to progressively limit positive EQ: ~~~
 
-            -wHfc=      High window center freq (default: at 5 oct ~ 630 Hz)
+            -wLfc=      Low window center freq (default: midband centered at 1000 Hz)
+
+            -wHfc=      High window center freq (default: same as wLfc)
 
             -wLoct=     Span in octaves for the left side of wL  (def: 5 oct)
 
@@ -85,7 +87,6 @@ The **reference level** on which it is applied the EQ is automatically detected,
 
             -noPos      Does not allow positive gains at all
 
-            -doFIR      Generates the pcm FIR after estimating the final EQ.
 
 
     ABOUT POSITIVE EQ GAIN:
@@ -94,7 +95,7 @@ The **reference level** on which it is applied the EQ is automatically detected,
 
     Two windows are available: wL works on the lower freq band, wH on highs.
 
-    These windows by default are centered at 5 octaves (630Hz) with symmetric
+    These windows by default are centered at midband 1000 Hz with symmetric
     span shapes of 5 oct, so minimized at 20 Hz and 20 Khz ends.
 
     If the measured level extends over most of the range 20 Hz ~ 20 KHz
@@ -121,45 +122,36 @@ Here we propose the evolutions [pe.audio.sys](https://github.com/AudioHumLab) or
 <img src="https://github.com/Rsantct/DRC/blob/master/doc/DRC_in_action.png" width="480">
 
 
-## Using the measurement software
-
-You can use a Linux o Mac OS (Homebrew) laptop, equipped with a suitable sound card and measurement mic.
-
-
-### Dependencies
-
-You'll need the following standard libraries (Linux Debian flavor install commands are shown below).
-
-#### Python3
-
-    sudo apt install python3-numpy python3-matplotlib python3-scipy
-
-Maybe you'll need to update the compilation tools and PIP (the Python packages manager):
-
-    sudo apt install python3-pip
-    sudo apt install build-essential libssl-dev libffi-dev python-dev
-    sudo pip3 install --upgrade pip
-    sudo pip3 install --upgrade setuptools
-    sudo pip3 install sounddevice
-
-
-#### AudioHumLab/audiotools
-
-You'll need to install our audio tools from **[AudioHumLab/audiotools](https://github.com/AudioHumLab/audiotools)**
-
-## Install 
+## Installing DRC
 
 This software is intended to be installed under the user's home folder. Please run the following commands:
 
-    cd
-    wget https://github.com/Rsantct/DRC/archive/master.zip
-    unzip master
-    rm master.zip
-    mv DRC-master DRC
-    chmod +x DRC/*.py
+    cd ~
+    curl -LO https://raw.githubusercontent.com/Rsantct/DRC/master/update-DRC.sh
+    sh update-DRC.sh master
 
-## Updating
 
-    sh ~/DRC/update.sh
+## Using DRC
+
+You can use a **Linux** or **Mac OS** laptop, equipped with a suitable sound card and measurement mic.
+
+Just run the DRC Graphic User Interface from a terminal:
+
+    ~/DRC/DRC_GUI.py &
+
+
+Note that you need to install Python3 and some of its standard modules, see:
+
+- [MacOS.md](https://github.com/Rsantct/DRC/blob/master/MacOS.md)
+
+- [Linux.md](https://github.com/Rsantct/DRC/blob/master/Linux.md)
+
+
+## Updating DRC
+
+    sh DRC/update-DRC.sh master
+
+    sh audiotools/update-audiotools.sh master
+
 
 
